@@ -1,283 +1,275 @@
-/**
- * TRENDIFY CORE ENGINE v2.5
- * State-driven telemetry controller with async race-condition mitigation
- * and dynamic client-side data derivation.
- */
+import { fetchDashboardData, PLATFORMS, PERIODS } from './data.js';
+import { deriveView, filterOrders, roundShares, ordersToCsv } from './model.js';
+import { createTrendChart, createDonutChart } from './charts.js';
+import { showToast, renderSkeletons, renderKPI, renderTable, renderErrorState, renderEmptyState, renderOrderDetail } from './ui.js';
+import { PLATFORM_COLORS, formatMoney, formatPrice, formatInteger, formatPercent, formatSignedPercent } from './format.js';
+import { enterWorkspace, syncSelectionTracks, openDialog, closeDialog } from './motion.js';
 
-import { fetchDashboardData } from './data.js';
-import { renderTrendChart, renderPlatformChart } from './charts.js';
-import { showToast, renderSkeletons, renderKPI, renderTable, renderErrorState, filterTransactions } from './ui.js';
-
-const state = {
-  currentPeriod: 'month',
-  currentPlatform: 'all',
-  activeStreams: ['Amazon', 'eBay', 'AliExpress'],
-  cachedTelemetry: null
-};
-
+const state = { period: 'month', loadedPeriod: null, platform: 'all', streams: [...PLATFORMS], data: null, query: '', status: 'all', page: 1, compare: true };
+const PAGE_SIZE = 6;
+const $ = selector => document.querySelector(selector);
 const DOM = {
-  sidebar: null,
-  mobileBtn: null,
-  closeBtn: null,
-  trendContainer: null,
-  platformContainer: null
+  main: $('.main-content'), trend: $('#trend-chart-container'), donut: $('#platform-chart-container'),
+  summary: $('#view-summary'), channels: $('#channels-dialog'), detail: $('#order-dialog'),
+  export: $('#export-btn'), search: $('#order-search'), status: $('#status-filter')
 };
+let dispatchId = 0;
+let loading = false;
+const trendChart = createTrendChart(DOM.trend);
+const donutChart = createDonutChart(DOM.donut, { onSelect: name => setPlatform(state.platform === name ? 'all' : name) });
+const getView = () => state.data ? deriveView(state.data,state) : null;
+const getOrders = view => filterOrders(view.transactions,state.query,state.status);
 
-let activeNetworkDispatchId = 0;
-let resizeDebounceTimer = null;
-
-/**
- * CORE LOGIC: Derived State Selector
- * Recomputes metrics and chart data from the active filters, using the
- * marketplace shares (platformDistribution) as a scaling factor.
- */
-function getFilteredTelemetry() {
-  const raw = state.cachedTelemetry;
-  if (!raw) return null;
-
-  const platforms = ['amazon', 'ebay', 'aliexpress'];
-  let ratio = 0;
-  let newDist = [0, 0, 0];
-
-  // 1. Work out the overall share of active data
-  if (state.currentPlatform !== 'all') {
-    const pIdx = platforms.indexOf(state.currentPlatform.toLowerCase());
-    const isStreamActive = state.activeStreams.some(s => s.toLowerCase() === state.currentPlatform.toLowerCase());
-
-    if (isStreamActive && pIdx !== -1) {
-      ratio = raw.charts.platformDistribution[pIdx] / 100;
-      newDist[pIdx] = 100; // the distribution ring is fully filled by the single selected platform
-    }
-  } else {
-    platforms.forEach((p, idx) => {
-      if (state.activeStreams.some(s => s.toLowerCase() === p.toLowerCase())) {
-        const pRatio = raw.charts.platformDistribution[idx] / 100;
-        ratio += pRatio;
-        newDist[idx] = raw.charts.platformDistribution[idx];
-      }
-    });
-
-    // Re-normalize the distribution chart if some streams are toggled off
-    if (ratio > 0 && ratio < 1) {
-      newDist = newDist.map(val => Math.round((val / (ratio * 100)) * 100));
-    }
-  }
-
-  // Zero-state fallback when every stream is disabled
-  if (ratio === 0) {
-    return {
-      ...raw,
-      revenue: { ...raw.revenue, value: '$0' },
-      orders: { ...raw.orders, value: '0' },
-      averageCheck: { ...raw.averageCheck, value: '$0' },
-      margin: { ...raw.margin, value: '0%' },
-      charts: { ...raw.charts, trend: raw.charts.trend.map(() => 0), platformDistribution: [0, 0, 0] }
-    };
-  }
-
-  // 2. String parser (turns "$12.4M" into 12.4)
-  const parseNum = (str) => parseFloat(str.replace(/[^0-9.]/g, ''));
-
-  // Recalculate Revenue
-  const revBase = parseNum(raw.revenue.value);
-  const isMil = raw.revenue.value.includes('M');
-  const isK = raw.revenue.value.includes('K');
-  const newRev = (revBase * ratio).toFixed(isMil ? 1 : 0);
-  const revStr = `$${newRev}${isMil ? 'M' : isK ? 'K' : ''}`;
-
-  // Recalculate Orders
-  const ordBase = parseNum(raw.orders.value);
-  const newOrd = Math.round(ordBase * ratio).toLocaleString('en-US');
-
-  // Scale the trend chart (visual shape is preserved, tooltip values change)
-  const newTrend = raw.charts.trend.map(val => Number((val * ratio).toFixed(2)));
-
-  // averageCheck and margin are left untouched: revenue/orders share the same
-  // ratio so the average is unchanged, and the mock data has no per-platform
-  // margin to derive a real delta from.
-  return {
-    ...raw,
-    revenue: { ...raw.revenue, value: revStr },
-    orders: { ...raw.orders, value: newOrd },
-    charts: {
-      ...raw.charts,
-      trend: newTrend,
-      platformDistribution: newDist
-    }
-  };
+function syncControls() {
+  document.querySelectorAll('[data-period]').forEach(button => button.setAttribute('aria-pressed',String(button.dataset.period === state.period)));
+  document.querySelectorAll('.channel-btn, .chip').forEach(button => {
+    const name = button.dataset.platform;
+    button.setAttribute('aria-pressed',String(name === state.platform));
+    button.disabled = name !== 'all' && !state.streams.includes(name);
+  });
+  document.querySelectorAll('.checkbox-list input').forEach(input => { input.checked = state.streams.includes(input.value); });
+  $('.channel-btn__count').textContent = state.streams.length;
+  syncSelectionTracks();
 }
 
-/**
- * MASTER RENDERER: Single point of truth for refreshing the UI.
- * Called on every state change (filters, platform, network sync).
- */
+function renderMetrics(view) {
+  const metric = (value, format, change, suffix = '%') => ({
+    value, format, change: view.isEmpty ? null : change,
+    changeLabel: view.isEmpty || change === null ? '—' : formatSignedPercent(change,suffix)
+  });
+  renderKPI({
+    revenue: metric(view.revenue,formatMoney,view.changes.revenue),
+    orders: metric(view.orders,formatInteger,view.changes.orders),
+    averageCheck: metric(view.average,formatPrice,view.changes.average),
+    margin: metric(view.margin,formatPercent,view.changes.margin,' pp')
+  });
+  document.querySelectorAll('.kpi-card__comparison').forEach(el => { el.textContent = `vs ${PERIODS[state.loadedPeriod].comparison}`; });
+}
+
+function renderTrend(view) {
+  const legend = $('#trend-legend');
+  if (view.isEmpty) {
+    trendChart.detach();
+    legend.replaceChildren();
+    renderEmptyState([DOM.trend], { text: 'Choose a channel to see your sales.', actionLabel: 'Show all channels', onAction: resetChannels });
+    return;
+  }
+  const color = view.included.length === 1 ? PLATFORM_COLORS[view.included[0]] : PLATFORM_COLORS.Amazon;
+  trendChart.update({
+    key: state.loadedPeriod, labels: state.data.trendLabels, values: view.trend,
+    ghost: state.compare ? view.previousTrend : null, color,
+    seriesName: view.included.length === 1 ? view.included[0] : 'Revenue',
+    comparisonName: PERIODS[state.loadedPeriod].comparison
+  });
+  legend.innerHTML = `<span class="chart-legend__item"><i style="background:${color}"></i>Selected ${state.loadedPeriod}</span>${state.compare ? '<span class="chart-legend__item chart-legend__item--ghost"><i></i>Previous period</span>' : ''}`;
+}
+
+function renderDonut(view) {
+  const values = PLATFORMS.map(name => state.streams.includes(name) ? state.data.platforms[name].revenue : 0);
+  const shares = roundShares(values);
+  const selected = state.platform !== 'all';
+  donutChart.update({
+    items: PLATFORMS.map((name,i) => ({ name, value: values[i], share: shares[i], enabled: state.streams.includes(name), color: PLATFORM_COLORS[name] })),
+    focus: state.platform,
+    centerValue: view.isEmpty ? '0' : selected ? `${shares[PLATFORMS.indexOf(state.platform)]}%` : String(state.streams.length),
+    centerCaption: selected ? state.platform : state.streams.length === 1 ? 'channel' : 'channels'
+  });
+}
+
+function renderSummary(view) {
+  DOM.summary.hidden = !view.isFiltered;
+  if (!view.isFiltered) { DOM.summary.replaceChildren(); return; }
+  const names = view.included.join(' + ');
+  DOM.summary.innerHTML = `<span>${view.isEmpty ? 'No channels included.' : `Showing <strong>${names}</strong>.`} Metrics and orders follow this selection.</span><button class="view-summary__reset" data-action="reset-filters">Show all</button>`;
+}
+
+function renderOrders() {
+  const view = getView();
+  if (!view) return;
+  const rows = getOrders(view);
+  const pages = Math.max(1,Math.ceil(rows.length/PAGE_SIZE));
+  state.page = Math.max(1,Math.min(state.page,pages));
+  const start = (state.page-1)*PAGE_SIZE;
+  renderTable(rows.slice(start,start+PAGE_SIZE), {
+    onReset: () => { clearOrderFilters(); resetChannels(); },
+    emptyText: view.isEmpty ? 'No channels are selected.' : 'No orders match your search or status.',
+    actionLabel: 'Clear filters'
+  });
+  $('#ledger-count').textContent = rows.length;
+  $('#table-summary').textContent = rows.length ? `${start+1}–${Math.min(start+PAGE_SIZE,rows.length)} of ${rows.length} sample orders` : '0 sample orders';
+  $('#page-number').textContent = `${state.page} / ${pages}`;
+  $('#prev-page').disabled = state.page === 1;
+  $('#next-page').disabled = state.page >= pages;
+  DOM.export.disabled = loading || rows.length === 0;
+  DOM.export.title = rows.length ? `Export all ${rows.length} matching sample orders` : 'No orders to export';
+}
+
 function renderDashboard() {
-  const data = getFilteredTelemetry();
-  if (!data) return;
-
-  window.requestAnimationFrame(() => {
-    renderKPI(data);
-    renderTrendChart(DOM.trendContainer, data.charts.trend, data.charts.trendLabels, state.currentPeriod);
-    renderPlatformChart(DOM.platformContainer, data.charts.platformDistribution);
-    // The table filters itself against the global state inside ui.js, so we pass the raw rows
-    renderTable(data.table, state);
-  });
+  const view = getView();
+  if (!view) return;
+  $('#date-range').textContent = PERIODS[state.loadedPeriod].range;
+  $('#trend-subtitle').textContent = PERIODS[state.loadedPeriod].resolution;
+  renderMetrics(view);
+  renderTrend(view);
+  renderDonut(view);
+  renderSummary(view);
+  renderOrders();
 }
 
-async function synchronizeTelemetry() {
-  const dispatchId = ++activeNetworkDispatchId;
-  renderSkeletons(DOM.trendContainer, DOM.platformContainer);
-
+async function loadData() {
+  const currentId = ++dispatchId;
+  const period = state.period;
+  loading = true;
+  DOM.main.setAttribute('aria-busy','true');
+  DOM.export.disabled = true;
+  if (state.data) DOM.main.classList.add('is-loading');
+  else renderSkeletons(DOM.trend,DOM.donut);
   try {
-    const data = await fetchDashboardData(state.currentPeriod);
-    if (dispatchId !== activeNetworkDispatchId) return;
-
-    state.cachedTelemetry = data;
+    const data = await fetchDashboardData(period);
+    if (currentId !== dispatchId) return;
+    state.data = data;
+    state.loadedPeriod = period;
+    state.page = 1;
+    loading = false;
     renderDashboard();
-  } catch (err) {
-    if (dispatchId === activeNetworkDispatchId) {
-      showToast("Telemetry Sync Error: Remote node unreachable.", "error");
-      if (state.cachedTelemetry) {
-        // Roll back to the last successful snapshot instead of leaving skeletons frozen
-        renderDashboard();
-      } else {
-        // No prior data to fall back to — show a recoverable error state with a retry action
-        renderErrorState(DOM.trendContainer, DOM.platformContainer, synchronizeTelemetry);
-      }
+  } catch {
+    if (currentId !== dispatchId) return;
+    loading = false;
+    if (state.data) {
+      state.period = state.loadedPeriod;
+      syncControls();
+      renderDashboard();
+      showToast('Could not load that period. Your previous view is still available.','error');
+    } else {
+      trendChart.detach(); donutChart.detach();
+      document.querySelectorAll('.kpi-card__value,.kpi-card__change').forEach(el => { el.textContent = '—'; });
+      renderErrorState([DOM.trend,DOM.donut],loadData);
+      renderTable([], { emptyText: 'Orders could not be loaded.', actionLabel: 'Try again', onReset: loadData });
+      $('#table-summary').textContent = 'Data unavailable';
+      $('#prev-page').disabled = true;
+      $('#next-page').disabled = true;
+    }
+  } finally {
+    if (currentId === dispatchId) {
+      DOM.main.classList.remove('is-loading');
+      DOM.main.setAttribute('aria-busy','false');
     }
   }
 }
 
-/**
- * Exports the rows currently visible in the Live Ledger table (after platform
- * and stream filters are applied) as a downloadable CSV file.
- */
-function exportCurrentView() {
-  const data = getFilteredTelemetry();
-  if (!data) {
-    showToast('Export Failed: No telemetry data loaded yet.', 'error');
-    return;
-  }
+function setPlatform(name) {
+  if (name === state.platform || (name !== 'all' && !state.streams.includes(name))) return;
+  state.platform = name;
+  state.page = 1;
+  syncControls();
+  renderDashboard();
+}
+function resetChannels() {
+  state.platform = 'all';
+  state.streams = [...PLATFORMS];
+  state.page = 1;
+  syncControls();
+  renderDashboard();
+}
+function clearOrderFilters() {
+  state.query = ''; state.status = 'all'; state.page = 1;
+  DOM.search.value = ''; DOM.status.value = 'all';
+}
 
-  const rows = filterTransactions(data.table, state);
-  if (rows.length === 0) {
-    showToast('Export Failed: No transactions match the current filter.', 'error');
-    return;
-  }
-
-  const escapeCsv = (val) => {
-    const str = String(val);
-    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-  };
-
-  const headerRow = ['ID', 'Timestamp', 'Product', 'Platform', 'Amount', 'Status'];
-  const csvRows = rows.map(r => [r.id, r.date, r.product, r.platform, r.price, r.status].map(escapeCsv).join(','));
-  const csvContent = [headerRow.join(','), ...csvRows].join('\n');
-
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+function exportOrders() {
+  const view = getView();
+  if (!view || loading) return;
+  const rows = getOrders(view);
+  if (!rows.length) return;
+  const blob = new Blob(['\uFEFF',ordersToCsv(rows)],{type:'text/csv;charset=utf-8;'});
   const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `trendify_${state.currentPeriod}_${new Date().toISOString().slice(0, 10)}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-
-  showToast(`Export Complete: ${rows.length} record${rows.length === 1 ? '' : 's'} downloaded.`);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `trendify_orders_${PERIODS[state.loadedPeriod].filename}.csv`;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url),1000);
+  showToast(`${rows.length} matching order${rows.length === 1 ? '' : 's'} exported.`);
 }
 
-function initializeExport() {
-  document.getElementById('export-btn')?.addEventListener('click', exportCurrentView);
+function openOrder(id) {
+  const row = state.data?.table.find(order => order.id === id);
+  if (!row) return;
+  renderOrderDetail(row,$('#order-detail'));
+  openDialog(DOM.detail);
 }
 
-function initializeNavigationDrawers() {
-  DOM.sidebar = document.querySelector('.filters-panel');
-  DOM.mobileBtn = document.getElementById('mobile-filters-btn');
-  DOM.closeBtn = document.getElementById('close-filters-btn');
-
-  const backdrop = document.createElement('div');
-  backdrop.className = 'filters-overlay';
-  document.body.appendChild(backdrop);
-
-  const toggleDrawer = (isOpen) => {
-    DOM.sidebar?.classList.toggle('filters-panel--open', isOpen);
-    backdrop.classList.toggle('filters-overlay--visible', isOpen);
-  };
-
-  DOM.mobileBtn?.addEventListener('click', () => toggleDrawer(true));
-  DOM.closeBtn?.addEventListener('click', () => toggleDrawer(false));
-  backdrop.addEventListener('click', () => toggleDrawer(false));
-
-  const timeframeController = document.getElementById('timeframe-selector');
-  timeframeController?.addEventListener('click', (e) => {
-    const trigger = e.target.closest('.period-btn');
-    if (!trigger || trigger.dataset.period === state.currentPeriod) return;
-
-    timeframeController.querySelectorAll('.period-btn').forEach(b => b.classList.remove('period-btn--active'));
-    trigger.classList.add('period-btn--active');
-
-    state.currentPeriod = trigger.dataset.period;
-    synchronizeTelemetry(); // requires a network round-trip
-    if (window.innerWidth <= 768) toggleDrawer(false);
+// Native modal dialogs trap Tab focus and make the rest of the page inert.
+// Only a pointer sequence that starts AND ends on the backdrop dismisses it.
+for (const dialog of [DOM.channels,DOM.detail]) {
+  let startedOnBackdrop = false;
+  dialog.addEventListener('cancel', event => { event.preventDefault(); closeDialog(dialog); });
+  dialog.addEventListener('keydown',event => {
+    if (event.key !== 'Tab') return;
+    const controls = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]')]
+      .filter(el => el.getClientRects().length);
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first?.focus();
+    }
   });
-
-  const platformController = document.getElementById('platform-selector');
-  platformController?.addEventListener('click', (e) => {
-    const trigger = e.target.closest('.period-btn');
-    if (!trigger || trigger.dataset.platform === state.currentPlatform) return;
-
-    platformController.querySelectorAll('.period-btn').forEach(b => b.classList.remove('period-btn--active'));
-    trigger.classList.add('period-btn--active');
-
-    state.currentPlatform = trigger.dataset.platform;
-    renderDashboard(); // no network call needed, recompute locally
-    if (window.innerWidth <= 768) toggleDrawer(false);
+  dialog.addEventListener('pointerdown',event => {
+    const r = dialog.getBoundingClientRect();
+    startedOnBackdrop = event.target === dialog && (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom);
   });
-
-  document.querySelectorAll('.checkbox-list input[type="checkbox"]').forEach(box => {
-    box.addEventListener('change', (e) => {
-      const targetPlatform = e.target.value;
-
-      if (e.target.checked) {
-        if (!state.activeStreams.includes(targetPlatform)) state.activeStreams.push(targetPlatform);
-        showToast(`Stream Restored: [${targetPlatform}] node operational.`);
-      } else {
-        state.activeStreams = state.activeStreams.filter(item => item !== targetPlatform);
-        showToast(`Connection Severed: [${targetPlatform}] data stream offline.`, 'error');
-      }
-
-      if (state.activeStreams.length === 0) {
-        showToast('CRITICAL WARNING: Zero active telemetry streams.', 'error');
-      }
-
-      renderDashboard(); // recompute locally
-    });
+  dialog.addEventListener('click',event => {
+    const r = dialog.getBoundingClientRect();
+    if (startedOnBackdrop && event.target === dialog && (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom)) closeDialog(dialog);
+    startedOnBackdrop = false;
   });
 }
 
-function bootstrap() {
-  DOM.trendContainer = document.getElementById('trend-chart-container');
-  DOM.platformContainer = document.getElementById('platform-chart-container');
+document.addEventListener('click',event => {
+  const close = event.target.closest('[data-close-dialog]');
+  if (close) return closeDialog(close.closest('dialog'));
+  const order = event.target.closest('[data-order]');
+  if (order) return openOrder(order.dataset.order);
+  const periodButton = event.target.closest('[data-period]');
+  if (periodButton && state.period !== periodButton.dataset.period) {
+    state.period = periodButton.dataset.period;
+    syncControls(); loadData(); return;
+  }
+  const channelButton = event.target.closest('.channel-btn,.chip');
+  if (channelButton && !channelButton.disabled) return setPlatform(channelButton.dataset.platform);
+  const action = event.target.closest('[data-action]')?.dataset.action;
+  if (action === 'manage-channels') openDialog(DOM.channels);
+  if (action === 'reset-filters') resetChannels();
+});
 
-  initializeNavigationDrawers();
-  initializeExport();
-  synchronizeTelemetry();
+document.querySelectorAll('.checkbox-list input').forEach(input => input.addEventListener('change',() => {
+  state.streams = PLATFORMS.filter(name => name === input.value ? input.checked : state.streams.includes(name));
+  if (!state.streams.includes(state.platform)) state.platform = 'all';
+  state.page = 1;
+  syncControls(); renderDashboard();
+}));
+DOM.search.addEventListener('input',() => { state.query = DOM.search.value; state.page = 1; renderOrders(); });
+DOM.status.addEventListener('change',() => { state.status = DOM.status.value; state.page = 1; renderOrders(); });
+$('#compare-period').addEventListener('change',event => { state.compare = event.target.checked; const view = getView(); if (view) renderTrend(view); });
+$('#prev-page').addEventListener('click',() => { state.page--; renderOrders(); });
+$('#next-page').addEventListener('click',() => { state.page++; renderOrders(); });
+DOM.export.addEventListener('click',exportOrders);
 
-  window.addEventListener('resize', () => {
-    clearTimeout(resizeDebounceTimer);
-    resizeDebounceTimer = setTimeout(() => {
-      const data = getFilteredTelemetry();
-      if (data) {
-        renderTrendChart(
-          DOM.trendContainer,
-          data.charts.trend,
-          data.charts.trendLabels,
-          state.currentPeriod
-        );
-      }
-    }, 160);
-  }, { passive: true });
-}
-
-document.addEventListener('DOMContentLoaded', bootstrap);
+// Keep navigation in sync with manual scrolling as well as anchor clicks.
+const updateNav = () => {
+  const atOrders = $('#orders').getBoundingClientRect().top < window.innerHeight * .45;
+  document.querySelectorAll('.nav-link').forEach(link => {
+    const active = (link.hash === '#orders') === atOrders;
+    link.classList.toggle('is-active',active);
+    if (active) link.setAttribute('aria-current','location');
+    else link.removeAttribute('aria-current');
+  });
+};
+window.addEventListener('scroll',updateNav,{passive:true});
+new ResizeObserver(() => trendChart.resize()).observe(DOM.trend);
+new ResizeObserver(syncSelectionTracks).observe($('.main-content'));
+document.fonts.ready.then(syncSelectionTracks);
+enterWorkspace();
+syncControls();
+loadData();

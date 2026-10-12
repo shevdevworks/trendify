@@ -1,15 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- Dark rounded background -->
-  <rect width="32" height="32" rx="7" fill="#111111"/>
-  <!-- Orange trend line (mirrors the main chart) -->
-  <polyline
-    points="4,25 9,18 14,21 20,12 27,7"
-    fill="none"
-    stroke="#FF5A00"
-    stroke-width="2.8"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-  />
-  <!-- Peak dot with glow effect -->
-  <circle cx="27" cy="7" r="3" fill="#FF5A00"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" rx="10" fill="#191a1d"/><path d="M9 28v-7m8 7V14m8 14V7" fill="none" stroke="#ff874f" stroke-width="5" stroke-linecap="round"/><path d="M33 28v-9" stroke="#ff874f" stroke-opacity=".35" stroke-width="5" stroke-linecap="round"/></svg>

@@ -1,0 +1,11 @@
+{
+  "name": "trendify",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An interactive commerce analytics portfolio project",
+  "scripts": {
+    "dev": "python -m http.server 8080 --bind 127.0.0.1",
+    "test": "node --test"
+  }
+}
