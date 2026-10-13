@@ -1,4 +1,4 @@
-export const PLATFORM_COLORS = { Amazon: '#ff874f', eBay: '#a7a7e8', AliExpress: '#88c7b7' };
+export const PLATFORM_COLORS = { Amazon: '#ff831f', eBay: '#aa88ff', AliExpress: '#2fe0b6' };
 const moneyFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 const priceFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const dateFormatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });

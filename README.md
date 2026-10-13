@@ -2,15 +2,15 @@
 
 A commerce analytics workspace for the fictional **Studio Supply** store. Track sales across Amazon, eBay, and AliExpress, explore revenue, and find the order behind a number.
 
-![Trendify — your store, in focus](og-image.png)
+![Trendify — your store, in focus](og-dashboard-v4.png)
 
-[Live demo](https://shevdevworks.github.io/trendify/) · [Desktop preview](portfolio/desktop.png) · [Mobile preview](portfolio/mobile.png) · [Walkthrough video](portfolio/walkthrough.webm)
+[Live demo](https://shevdevworks.github.io/trendify/) · [Desktop preview](portfolio/desktop.png) · [Mobile preview](portfolio/mobile.png) · [Walkthrough video](portfolio/walkthrough.mp4)
 
 This is a **frontend portfolio project** with illustrative data for June 2026. It has no backend, authentication, payment processing, or marketplace connections. The channel controls change the local view; they do not connect or disconnect real accounts.
 
 ## The experience
 
-- A revenue-first charcoal workspace with a warm orange accent, self-hosted Manrope, and custom SVG product illustrations.
+- A revenue-first midnight workspace with a vivid orange accent, violet and mint channel colors, self-hosted Manrope, and custom SVG product illustrations.
 - Revenue, orders, average order value, and revenue-weighted margin derived from the same selected channels.
 - An orchestrated entrance: the revenue line draws across its canvas as the totals count up. Period and channel changes morph the existing curve, including transitions between different point counts.
 - Sliding selection indicators, animated order rows, channel previews on hover or keyboard focus, and an order drawer with coordinated entrance and exit transitions. Motion uses native browser APIs, with no animation dependency.
@@ -71,7 +71,8 @@ js/format.js            Shared colors, formatting, and HTML escaping
 assets/fonts/           Self-hosted Manrope and its OFL license
 tests/model.test.js      Calculation and export regression tests
 portfolio/              Screenshots and an interface walkthrough
-og-image.png            1200 × 630 sharing cover
+og-dashboard-v4.png     1200 × 630 sharing cover
+scripts/social-cover.html  Editable sharing-cover source
 ```
 
 Manrope is distributed under the SIL Open Font License; see `assets/fonts/OFL.txt`.

@@ -1,3 +1,7 @@
 .playwright-mcp/
 node_modules/
 *.log
+
+# Local freelance portfolio exports and capture helpers
+exports/
+scripts/*-portfolio.cjs

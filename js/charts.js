@@ -129,7 +129,7 @@ export function createTrendChart(container) {
     const gradId = `trend-grad-${uid}`;
     const defs = svgEl('defs');
     const grad = svgEl('linearGradient', { id: gradId, x1: 0, y1: 0, x2: 0, y2: 1 });
-    const stopTop = svgEl('stop', { offset: '0%', 'stop-opacity': 0.28 });
+    const stopTop = svgEl('stop', { offset: '0%', 'stop-opacity': 0.42 });
     const stopBottom = svgEl('stop', { offset: '100%', 'stop-opacity': 0 });
     grad.append(stopTop, stopBottom);
     defs.appendChild(grad);
